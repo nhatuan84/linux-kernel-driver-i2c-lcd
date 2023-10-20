@@ -108,3 +108,11 @@ int queue_is_empty(void)
     return ret;
 }
 
+void queue_clean(void)
+{
+#ifdef USE_MUTEX
+    mutex_destroy(&local_mutex); 
+#else
+
+#endif
+}

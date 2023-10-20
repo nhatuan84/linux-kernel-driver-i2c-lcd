@@ -15,17 +15,37 @@
 #include <linux/err.h>
 #include <linux/workqueue.h>
 #include <linux/kthread.h>
+#include <linux/gfp.h> 
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/device.h>
+#include <linux/init.h> 
+#include <linux/fs.h> 
+#include <linux/mm.h> 
+#include <asm/uaccess.h>
+#include <linux/init.h>
+#include <linux/module.h>
+#include <linux/fs.h>
+#include <linux/mm.h>
+#include <linux/gfp.h> 
 #include <linux/mutex.h>
+
 #include "LiquidCrystal_I2C.h"
 #include "ioctl_cmd.h"
 #include "queue.h"
+
+static DEFINE_MUTEX(dev_mutex);
 
 static char lcd_string[32] = "iotsharing.com";
 static int lcd_backlight = 0;
 static int lcd_home = 0;
 static int lcd_clear = 0;
 
-static DEFINE_MUTEX(dev_mutex);
+#define USE_PAGE
+#define PAGE_ORDER 2
+#define MAX_SIZE (PAGE_SIZE << PAGE_ORDER)
+static char *device_buffer = NULL;
+static struct page * page = NULL;
 
 #define USE_THREAD
 
@@ -157,6 +177,7 @@ static int      dev_release(struct inode *inode, struct file *file);
 static ssize_t  dev_read(struct file *filp, char __user *buf, size_t len,loff_t * off);
 static ssize_t  dev_write(struct file *filp, const char *buf, size_t len, loff_t * off);
 static long     dev_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
+static int      dev_mmap(struct file *file, struct vm_area_struct *vma);
 
 static struct file_operations fops =
 {
@@ -166,6 +187,7 @@ static struct file_operations fops =
     .open           = dev_open,
     .unlocked_ioctl = dev_ioctl,
     .release        = dev_release,
+    .mmap           = dev_mmap,
 };
 
 static int dev_open(struct inode *inode, struct file *file)
@@ -177,46 +199,57 @@ static int dev_open(struct inode *inode, struct file *file)
 
 static int dev_release(struct inode *inode, struct file *file)
 {
-    // print_lcd(lcd_string);
-    // int len = strlen(lcd_string);
-    // work->data = kmalloc(len+1, GFP_KERNEL);
-    // memcpy(work->data, lcd_string, len);
-    // work->data[len] = 0;
+    int l = strlen(device_buffer);
+    if(l >= 32)
+    {
+        memcpy(lcd_string, device_buffer, 32);
+    }
+    else
+    {
+        memcpy(lcd_string, device_buffer, l);
+        lcd_string[l] = 0;
+    }
     queue_add_node(lcd_string);
-    #ifndef USE_THREAD
-        schedule_work(&work->workqueue);
-    #endif
-    pr_info("release device %s\n", lcd_string);
+#ifndef USE_THREAD
+    schedule_work(&work->workqueue);
+#endif
+    pr_info("release device %s\n", device_buffer);
     mutex_unlock(&dev_mutex);
     return 0;
 }
 
 static ssize_t dev_read(struct file *filp, char __user *buf, size_t len, loff_t *off)
 {
-    int l = strlen(lcd_string);
-    pr_info("read device\n");
-    if(*off < l)
+    size_t ret;
+    if ((*off + len) > MAX_SIZE)
     {
-        copy_to_user(buf, lcd_string, l);
-        *off += l;
-        return l;
+        pr_err("read exceed space");
+    }
+    else
+    {
+        
+        ret = copy_to_user(buf, device_buffer + *off, len);
+        pr_info("dev_read %d %d %d\n", len, *off, ret);
+        *off += len;
+        return len;
     }
     return 0;
 }
 
 static ssize_t dev_write(struct file *filp, const char __user *buf, size_t len, loff_t *off)
 {
+    pr_info("write device\n");
     if(*off == 0)
     {
-        memset(lcd_string, 0, 32);
+        memset(device_buffer, 0, MAX_SIZE);
     }
-    if(len > 0 && (*off + len) <= 32)
+    if(len > 0 && (*off + len) <= MAX_SIZE)
     {
-        copy_from_user(&lcd_string[*off], buf, len);
+        copy_from_user(&device_buffer[*off], buf, len);
         *off += len;
-        lcd_string[*off] = 0;
+        device_buffer[*off] = 0;
     }
-    pr_info("write device\n");
+    pr_info("device_buffer = %s\n", device_buffer);
     return len;
 }
 
@@ -260,10 +293,73 @@ static long dev_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
     }
     return 0;
 }
+//////////mmap
+static int init_pages(void)
+{
+#ifdef USE_PAGE
+    page = alloc_pages(GFP_KERNEL, PAGE_ORDER);
+    if (!page) 
+    {
+        pr_err("alloc_page failed\n");
+        return -1;
+    }
+#else
+    device_buffer = kmalloc(MAX_SIZE, GFP_KERNEL);
+    if(device_buffer == NULL)
+    {
+        pr_err("device_buffer is NULL\n");
+        return -1;
+    }
+#endif
 
+    return 0;
+}
+
+static int dev_mmap(struct file *file, struct vm_area_struct *vma)
+{
+    unsigned long size;
+    unsigned long max_size_with_offset;
+    unsigned long pfn_start;
+    int ret;
+#ifdef USE_PAGE
+    void *virt_start;
+    pfn_start = page_to_pfn(page) + vma->vm_pgoff;
+    device_buffer = page_address(page) + (vma->vm_pgoff << PAGE_SHIFT);
+    pr_info("device phy start: 0x%px == 0x%px offset = %lx\n", 
+                        pfn_start << PAGE_SHIFT, device_buffer, vma->vm_pgoff);
+#else
+    page = virt_to_page((unsigned long)device_buffer + (vma->vm_pgoff << PAGE_SHIFT));
+    pfn_start = page_to_pfn(page);
+    device_buffer += (vma->vm_pgoff << PAGE_SHIFT);
+    pr_info("device phy start: 0x%px == 0x%px\n", pfn_start << PAGE_SHIFT, device_buffer);
+#endif
+    
+    max_size_with_offset = ((1 << PAGE_ORDER) - vma->vm_pgoff) << PAGE_SHIFT;
+    size = vma->vm_end - vma->vm_start;
+
+    if (size > max_size_with_offset) 
+    {
+        pr_info("offset too large");
+        return -1;
+    }
+
+    ret = remap_pfn_range(vma, vma->vm_start, pfn_start, size, vma->vm_page_prot);
+
+    if (ret) 
+    {
+        pr_info("remap_pfn_range failed, vm_start: 0x%lx\n", vma->vm_start);
+    }
+    else 
+    {
+        pr_info("map kernel 0x%px to user 0x%lx, size: 0x%lx\n",
+                                        page, vma->vm_start, size);
+    }
+
+    return ret;
+}
 /////////////////////
 #define I2C_BUS_NR              1           
-#define I2C_DEV_NAME            "lcd"     
+#define I2C_DEV_NAME            "lcd_dev"     
 #define I2C_DEV_ADDR            0x27   //try to move to device tree
  
 static struct i2c_adapter *etx_i2c_adapter = NULL; 
@@ -397,7 +493,7 @@ static struct i2c_board_info i2c_lcd_info = {
 
 static int init_dev(void)
 {
-    if((alloc_chrdev_region(&lcd_dev, 0, 1, "lcd_dev")) <0){
+    if((alloc_chrdev_region(&lcd_dev, 0, 1, I2C_DEV_NAME)) <0){
             pr_err("Cannot allocate major number\n");
             return -1;
     }
@@ -426,7 +522,7 @@ static int init_dev(void)
         class_destroy(lcd_dev_class);
         return -1;
     }
-    
+    mutex_init(&dev_mutex);
     pr_info("Device Driver Insert...Done!!!\n");
     return 0;
 }
@@ -447,7 +543,6 @@ static int init_lcd(void)
         }
         
         i2c_put_adapter(etx_i2c_adapter);
-        queue_init();
     }
     
     return ret;
@@ -473,8 +568,15 @@ static int init_sys(void)
 static int __init i2c_lcd_driver_init(void)
 {
     int ret = -1;
-    mutex_init(&dev_mutex);
     ret = init_lcd();
+    queue_init();
+#ifdef USE_THREAD
+    init_thread();
+#else
+    init_wq();
+#endif
+
+    init_pages();
     if(ret == 0)
     {
         ret = init_dev();
@@ -483,12 +585,6 @@ static int __init i2c_lcd_driver_init(void)
     {
         ret = init_sys();
     }
-    
-#ifdef USE_THREAD
-    init_thread();
-#else
-    init_wq();
-#endif
 
     pr_info("driver inited\n");
     return ret;
@@ -496,6 +592,11 @@ static int __init i2c_lcd_driver_init(void)
  
 static void __exit i2c_lcd_driver_exit(void)
 {
+#ifdef USE_PAGE
+    __free_pages(page, PAGE_ORDER);
+#else
+    kfree(device_buffer);
+#endif
     mutex_destroy(&dev_mutex); 
     queue_clean();
     i2c_unregister_device(etx_i2c_lcd);
