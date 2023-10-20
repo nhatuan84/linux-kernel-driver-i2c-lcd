@@ -9,7 +9,9 @@ or use: mmap() to write directly to device
 
 update the bus and device I2C address:
 
-#define I2C_BUS_NR              1     
+#define I2C_BUS_NR              1 
+
+#define I2C_DEV_NAME            "lcd_dev" 
 
 #define I2C_DEV_ADDR            0x27 
 
