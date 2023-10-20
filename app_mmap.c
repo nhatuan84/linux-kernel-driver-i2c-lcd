@@ -34,6 +34,9 @@ int main()
                 MAP_SHARED | MAP_LOCKED, fd, 1*(size_t)getpagesize());
     
     ret = sprintf(addr, "%s", message);
+
+    lseek(fd, 3, SEEK_SET);
+
     for(int i=0; i<10; i++)
     {
         

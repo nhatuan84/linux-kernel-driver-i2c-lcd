@@ -178,6 +178,7 @@ static ssize_t  dev_read(struct file *filp, char __user *buf, size_t len,loff_t 
 static ssize_t  dev_write(struct file *filp, const char *buf, size_t len, loff_t * off);
 static long     dev_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 static int      dev_mmap(struct file *file, struct vm_area_struct *vma);
+static loff_t   dev_llseek(struct file *file, loff_t offset, int whence);
 
 static struct file_operations fops =
 {
@@ -188,6 +189,7 @@ static struct file_operations fops =
     .unlocked_ioctl = dev_ioctl,
     .release        = dev_release,
     .mmap           = dev_mmap,
+    .llseek         = dev_llseek,
 };
 
 static int dev_open(struct inode *inode, struct file *file)
@@ -195,6 +197,32 @@ static int dev_open(struct inode *inode, struct file *file)
     pr_info("open device\n");
     mutex_lock(&dev_mutex);
     return 0;
+}
+
+static loff_t dev_llseek(struct file *file, loff_t offset, int whence)
+{
+    loff_t pos;
+    switch(whence) {
+    case 0: /* SEEK_SET */
+        pos = offset;
+        break;
+    case 1: /* SEEK_CUR */
+        pos = file->f_pos + offset;
+        break;
+    case 2: /* SEEK_END */
+        pos = MAX_SIZE;
+        break;
+    default:
+        return -EINVAL;
+    }
+    if (pos < 0 || pos > MAX_SIZE)
+    {
+        pr_err("seek error\n");
+        return -EINVAL;
+    }
+
+    file->f_pos = pos; 
+    return pos;
 }
 
 static int dev_release(struct inode *inode, struct file *file)
