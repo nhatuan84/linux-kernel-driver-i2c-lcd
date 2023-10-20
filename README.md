@@ -5,6 +5,8 @@ set the backlight, home, clear via ioctl /dev/lcd_dev
 
 send/receive text to display via /dev/lcd_dev
 
+or use: mmap() to write directly to device
+
 update the bus and device I2C address:
 
 #define I2C_BUS_NR              1     
